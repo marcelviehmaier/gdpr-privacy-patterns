@@ -1,0 +1,679 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+    Generator: "former2"
+Description: ""
+Resources:
+    DynamoDBTable:
+        Type: "AWS::DynamoDB::Table"
+        Properties:
+            AttributeDefinitions: 
+              - 
+                AttributeName: "id"
+                AttributeType: "S"
+            TableName: "analysis-service-user-table"
+            KeySchema: 
+              - 
+                AttributeName: "id"
+                KeyType: "HASH"
+            ProvisionedThroughput: 
+                ReadCapacityUnits: 5
+                WriteCapacityUnits: 5
+    LambdaFunction:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "analysis-service-fetch-data"
+            Handler: "index.handler"
+            Code:
+                ZipFile: |
+                    const { fetchDataFromDatabase } = require('./repository.js');
+                    var AWS = require('aws-sdk');
+                    AWS.config.update({ region: 'us-east-2' });
+                    var docClient = new AWS.DynamoDB.DocumentClient({apiVersion: "2012-08-10"});
+
+                    exports.handler = async(event, context, callback) => {
+
+                        var user = await fetchDataFromDatabase("analysis-service-user-table", event.pathParameters.id);
+
+                         var response = {
+                            "statusCode": 200,
+                            "body": JSON.stringify(user),
+                            "isBase64Encoded": false
+                        };
+                        callback(null, response);
+                    };
+
+                    exports.fetchDataFromDatabase = async(tableName, id) => {
+                        try {
+                            var params = {
+                                Key: {
+                                    "id": id
+                                },
+                                TableName: tableName
+                            };
+
+                            var result = await docClient.get(params).promise()
+                            return result.Item;
+                        }
+                        catch (error) {
+                            console.error(error);
+                        }
+                    }
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/test"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction2:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "analysis-service-delete-data"
+            Handler: "index.handler"
+            Code:
+                ZipFile: |
+                    var AWS = require('aws-sdk');
+                    AWS.config.update({ region: 'us-east-2' });
+                    var docClient = new AWS.DynamoDB.DocumentClient({ apiVersion: "2012-08-10" });
+
+                    exports.handler = (event, context, callback) => {
+                        const body = JSON.parse(event.body);
+                        deleteConnectionId(event.pathParameters.id).then(() => {
+                            var response = {
+                            "statusCode": 200,
+                            "isBase64Encoded": false
+                        };
+
+                        callback(null, response);
+                        });
+                    };
+
+
+                    function deleteConnectionId(userID) {
+                        return docClient
+                            .delete({
+                                TableName: 'analysis-service-user-table',
+                                Key: {
+                                    id: userID
+                                }
+                            })
+                            .promise();
+                    }
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/test"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction3:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "analysis-service-save-data"
+            Handler: "index.handler"
+            Code:
+                ZipFile: |
+                    var AWS = require('aws-sdk');
+                    const { fetchDataFromDatabase } = require('./repository.js');
+                    const { saveUser } = require('./repository.js');
+                    var AWS = require('aws-sdk');
+                    AWS.config.update({ region: 'us-east-2' });
+                    var docClient = new AWS.DynamoDB.DocumentClient({apiVersion: "2012-08-10"});
+
+                    exports.saveUser = (user) => {
+                        var params = {
+                            TableName: 'analysis-service-user-table',
+                            Item: {
+                                'id': user._id,
+                                'name': user._name,
+                                'username': user._username,
+                                'email': user._email,
+                                'password': user._password
+                            }
+                        };
+
+                        docClient.put(params, function(err, data) {
+                            if (err) {
+                                console.log("Error", err);
+                            }
+                            else {
+                                console.log("Success: Saved data");
+                            }
+                        });
+                    }
+
+                    exports.handler = (event, context, callback) => {
+                        const body = JSON.parse(event.body);
+
+                        let user = new User(context.awsRequestId, body.name, body.username, body.email, body.password);
+                            saveUser(user);
+
+                        var response = {
+                            "statusCode": 200,
+                            "body": JSON.stringify(user),
+                            "isBase64Encoded": false
+                        };
+
+                        callback(null, response);
+                    };
+
+                    // Defining User Object
+                    var User = function(id, name, username, email, password) {
+                        this._id = id;
+                        this._name = name;
+                        this._username = username;
+                        this._email = email;
+                        this._password = password;
+                    };
+
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/test"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction4:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "analysis-service-update-data"
+            Handler: "index.handler"
+            Code:
+                ZipFile: |
+                    var AWS = require('aws-sdk');
+                    AWS.config.update({ region: 'us-east-2' });
+                    var docClient = new AWS.DynamoDB.DocumentClient({ apiVersion: "2012-08-10" });
+
+                    exports.handler = async (event, context, callback) => {
+                        const body = JSON.parse(event.body);
+                        let user = new User(event.pathParameters.id, body.name, body.username, body.email, body.password);
+                        let userReponse = await updateUser(user);
+                        var response = {
+                            "statusCode": 200,
+                            "isBase64Encoded": false
+                        };
+
+                        callback(null, response);
+                    };
+
+                    function updateUser (user) {
+                      const params = {
+                        TableName: 'analysis-service-user-table',
+                        Key: {
+                          id: user._id,
+                        },
+                        UpdateExpression: 'set username = :r',
+                        ExpressionAttributeValues: {
+                          ':r': user._username,
+                        },
+                      };
+
+                      return docClient.update(params).promise();
+                    }
+
+                    // Defining User Object
+                    var User = function(id, name, username, email, password) {
+                        this._id = id;
+                        this._name = name;
+                        this._username = username;
+                        this._email = email;
+                        this._password = password;
+                    };
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/test"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+    CognitoUserPoolResourceServer:
+        Type: "AWS::Cognito::UserPoolResourceServer"
+        Properties:
+            Identifier: !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev"
+            Name: "gdpr-microservice-resource-server"
+            UserPoolId: !Ref CognitoUserPool
+            Scopes: 
+              - 
+                ScopeName: "user.read"
+                ScopeDescription: "retrieve user data"
+
+    CognitoUserPool:
+        Type: "AWS::Cognito::UserPool"
+        Properties:
+            UserPoolName: "gdpr-microservices-user-pool"
+            Policies: 
+                PasswordPolicy: 
+                    MinimumLength: 6
+                    RequireUppercase: false
+                    RequireLowercase: false
+                    RequireNumbers: true
+                    RequireSymbols: false
+                    TemporaryPasswordValidityDays: 7
+            LambdaConfig: {}
+            Schema: 
+              - 
+                Name: "sub"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: false
+                Required: true
+                StringAttributeConstraints: 
+                    MinLength: "1"
+                    MaxLength: "2048"
+              - 
+                Name: "name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "given_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "family_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "middle_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "nickname"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "preferred_username"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "profile"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "picture"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "website"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "email"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: true
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "email_verified"
+                AttributeDataType: "Boolean"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+              - 
+                Name: "gender"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "birthdate"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "10"
+                    MaxLength: "10"
+              - 
+                Name: "zoneinfo"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "locale"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "phone_number"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "address"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "updated_at"
+                AttributeDataType: "Number"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                NumberAttributeConstraints: 
+                    MinValue: "0"
+            AutoVerifiedAttributes: 
+              - "email"
+            MfaConfiguration: "OFF"
+            EmailConfiguration: 
+                EmailSendingAccount: "COGNITO_DEFAULT"
+            AdminCreateUserConfig: 
+                AllowAdminCreateUserOnly: false
+            UserPoolTags: {}
+            AccountRecoverySetting: 
+                RecoveryMechanisms: 
+                  - 
+                    Priority: 1
+                    Name: "verified_email"
+                  - 
+                    Priority: 2
+                    Name: "verified_phone_number"
+            UsernameConfiguration: 
+                CaseSensitive: false
+            VerificationMessageTemplate: 
+                DefaultEmailOption: "CONFIRM_WITH_CODE"
+
+    CognitoUserPoolClient:
+        Type: "AWS::Cognito::UserPoolClient"
+        Properties:
+            UserPoolId: !Ref CognitoUserPool
+            ClientName: "gdpr-microservices-client-app"
+            RefreshTokenValidity: 3650
+            ReadAttributes: 
+              - "address"
+              - "birthdate"
+              - "email"
+              - "email_verified"
+              - "family_name"
+              - "gender"
+              - "given_name"
+              - "locale"
+              - "middle_name"
+              - "name"
+              - "nickname"
+              - "phone_number"
+              - "picture"
+              - "preferred_username"
+              - "profile"
+              - "updated_at"
+              - "website"
+              - "zoneinfo"
+            WriteAttributes: 
+              - "address"
+              - "birthdate"
+              - "email"
+              - "family_name"
+              - "gender"
+              - "given_name"
+              - "locale"
+              - "middle_name"
+              - "name"
+              - "nickname"
+              - "phone_number"
+              - "picture"
+              - "preferred_username"
+              - "profile"
+              - "updated_at"
+              - "website"
+              - "zoneinfo"
+            ExplicitAuthFlows: 
+              - "ALLOW_CUSTOM_AUTH"
+              - "ALLOW_REFRESH_TOKEN_AUTH"
+              - "ALLOW_USER_SRP_AUTH"
+            GenerateSecret: true
+            PreventUserExistenceErrors: "ENABLED"
+    ApiGatewayRestApi:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "microservice-gateway"
+            Description: "API Gateway for backend microservices"
+            ApiKeySourceType: "HEADER"
+            EndpointConfiguration: 
+                Types: 
+                  - "REGIONAL"
+
+    ApiGatewayResource:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "analysis-service"
+            ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+
+    ApiGatewayResource2:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "{id}"
+            ParentId: !Ref ApiGatewayResource3
+
+    ApiGatewayResource3:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "user"
+            ParentId: !Ref ApiGatewayResource
+
+    ApiGatewayMethod:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "DELETE"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:analysis-service-delete-data/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod2:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "GET"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:analysis-service-fetch-data/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod3:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "PUT"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:analysis-service-update-data/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod4:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource3
+            HttpMethod: "POST"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource3
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:analysis-service-save-data/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+    ApiGatewayAuthorizer:
+        Type: "AWS::ApiGateway::Authorizer"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            Name: "gdpr-microservices-api-auhtorizer"
+            Type: "COGNITO_USER_POOLS"
+            ProviderARNs: 
+              - !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${AWS::Region}_f7R1ywB5i"
+            AuthType: "cognito_user_pools"
+            IdentitySource: "method.request.header.Authorization"
+    LogsLogGroup:
+        Type: "AWS::Logs::LogGroup"
+        Properties:
+            LogGroupName: "/aws/lambda/analysis-service-delete-data"
+
+    LogsLogGroup2:
+        Type: "AWS::Logs::LogGroup"
+        Properties:
+            LogGroupName: "/aws/lambda/analysis-service-fetch-data"
+
+    LogsLogGroup3:
+        Type: "AWS::Logs::LogGroup"
+        Properties:
+            LogGroupName: "/aws/lambda/analysis-service-save-data"
+
+    LogsLogGroup4:
+        Type: "AWS::Logs::LogGroup"
+        Properties:
+            LogGroupName: "/aws/lambda/analysis-service-update-data"
+
+    LogsLogGroup5:
+        Type: "AWS::Logs::LogGroup"
+        Properties:
+            LogGroupName: "microservice-api-gateway-logs"

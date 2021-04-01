@@ -1,0 +1,973 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+    Generator: "former2"
+Description: ""
+Resources:
+    LambdaFunction:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "ManualStepActivityWorker2"
+            Handler: "index.handler"
+            Code: 
+                ZipFile: |
+                    'use strict';
+                    console.log('Loading function');
+                    const aws = require('aws-sdk');
+                    const stepfunctions = new aws.StepFunctions();
+                    const ses = new aws.SES();
+                    exports.handler = (event, context, callback) => {
+
+                        var taskParams = {
+                            activityArn: 'arn:aws:states:us-east-2:876746095634:activity:ManualStep'
+                        };
+
+                        stepfunctions.getActivityTask(taskParams, function(err, data) {
+                            if (err) {
+                                console.log(err, err.stack);
+                                context.fail('An error occured while calling getActivityTask.');
+                            } else {
+                                if (data === null) {
+                                    // No activities scheduled
+                                    context.succeed('No activities received after 60 seconds.');
+                                } else {
+                                    var input = JSON.parse(data.input);
+                                    var emailParams = {
+                                        Destination: {
+                                            ToAddresses: [
+                                                input.managerEmailAddress
+                                                ]
+                                        },
+                                        Message: {
+                                            Subject: {
+                                                Data: 'Your Approval Needed for Promotion!',
+                                                Charset: 'UTF-8'
+                                            },
+                                            Body: {
+                                                Html: {
+                                                    Data: 'Hi!<br />' +
+                                                        input.employeeName + ' has been nominated for promotion!<br />' +
+                                                        'Can you please approve:<br />' +
+                                                        'https://API_DEPLOYMENT_ID.execute-api.us-east-1.amazonaws.com/respond/succeed?taskToken=' + encodeURIComponent(data.taskToken) + '<br />' +
+                                                        'Or reject:<br />' +
+                                                        'https://API_DEPLOYMENT_ID.execute-api.us-east-1.amazonaws.com/respond/fail?taskToken=' + encodeURIComponent(data.taskToken),
+                                                    Charset: 'UTF-8'
+                                                }
+                                            }
+                                        },
+                                        Source: input.managerEmailAddress,
+                                        ReplyToAddresses: [
+                                                input.managerEmailAddress
+                                            ]
+                                    };
+
+                                    ses.sendEmail(emailParams, function (err, data) {
+                                        if (err) {
+                                            console.log(err, err.stack);
+                                            context.fail('Internal Error: The email could not be sent.');
+                                        } else {
+                                            console.log(data);
+                                            context.succeed('The email was successfully sent.');
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    };
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/LambdaManualStepActivityWorkerRole"
+            Runtime: "nodejs12.x"
+            Timeout: 75
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction2:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: "Adds index entries to DynamoDB for each new S3 object that matches a given criteria."
+            Environment: 
+                Variables: 
+                    INDEX_TABLE: "test-IndexTable-1XURJ1ZGKDTQ2"
+            FunctionName: "test-IndexerFunction-1NHVJDBVD1WFK2"
+            Handler: "s3Indexer.handler"
+            Code: 
+                ZipFile: |
+                    const AWS = require('aws-sdk');
+                    const s3 = new AWS.S3('2006-03-01');
+                    const dynamodb = new AWS.DynamoDB('2012-08-10');
+
+                    const keyRegex = /[^/]+\/([^/]+)\/[^/]+\/([^-]+)-([^.]+).data/;
+
+                    const INDEX_TABLE = process.env.INDEX_TABLE;
+
+                    exports.handler = async function(event) {
+                        console.log(`Received event: ${JSON.stringify(event)}`);
+                        try {
+                            return handleEvent(event);
+                        } catch(err) {
+                            console.error("An error occured while processing the event");
+                            console.error(err);
+                        }
+                    };
+
+                    async function handleEvent(event) {
+                        const record = event.Records[0];
+                        const object = record.s3.object;
+                        const bucket = record.s3.bucket.name;
+                        const key = decodeURIComponent(object.key.replace(/\+/g, " "));
+                        const match = keyRegex.exec(key);
+                        if(!match) {
+                            console.log("Key did not match pattern. Skipping.");
+                            return;
+                        }
+
+                        console.log(`Indexing ${bucket}/${key}`);
+
+                        const indexItem = {};
+
+                        const serverId = match[1];
+                        const custId = match[2];
+                        const ts = match[3];
+
+                        indexItem['Key'] = {S: key};
+                        indexItem['Size'] = {N: object.size.toString()};
+                        indexItem['ServerID'] = {S: serverId};
+                        indexItem['CustID'] = {S: custId};
+                        indexItem['TS-ServerID'] = {S: new Date(parseInt(ts)).toISOString() + serverId};
+
+                        const s3HeadParams = {
+                            Bucket: bucket,
+                            Key: key
+                        };
+
+                        console.log("Fetching S3 metadata");
+                        const s3Response = await s3.headObject(s3HeadParams).promise();
+
+                        if(s3Response.Metadata.hastransaction === 'true') {
+                            indexItem.HasTransaction = {S: 'true'};
+                        }
+
+                        console.log("Putting index item");
+                        return putItem(indexItem);
+                    }
+
+                    function putItem(indexItem) {
+                        var putParams = {
+                            TableName: INDEX_TABLE,
+                            Item: indexItem
+                        };
+
+                        return dynamodb.putItem(putParams).promise();
+                    }
+            MemorySize: 512
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/test-IndexerFunctionRole-143ARW4R6CDUK"
+            Runtime: "nodejs12.x"
+            Timeout: 30
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction3:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: "Lambda function that callback to AWS Step Functions"
+            FunctionName: "LambdaApprovalFunction2"
+            Handler: "index.handler"
+            Code: 
+                ZipFile: |
+                    const AWS = require('aws-sdk');
+                    var redirectToStepFunctions = function(lambdaArn, statemachineName, executionName, callback) {
+                      const lambdaArnTokens = lambdaArn.split(":");
+                      const partition = lambdaArnTokens[1];
+                      const region = lambdaArnTokens[3];
+                      const accountId = lambdaArnTokens[4];
+
+                      console.log("partition=" + partition);
+                      console.log("region=" + region);
+                      console.log("accountId=" + accountId);
+
+                      const executionArn = "arn:" + partition + ":states:" + region + ":" + accountId + ":execution:" + statemachineName + ":" + executionName;
+                      console.log("executionArn=" + executionArn);
+
+                      const url = "https://console.aws.amazon.com/states/home?region=" + region + "#/executions/details/" + executionArn;
+                      callback(null, {
+                          statusCode: 302,
+                          headers: {
+                            Location: url
+                          }
+                      });
+                    };
+
+                    exports.handler = (event, context, callback) => {
+                      console.log('Event= ' + JSON.stringify(event));
+                      const action = event.query.action;
+                      const taskToken = event.query.taskToken;
+                      const statemachineName = event.query.sm;
+                      const executionName = event.query.ex;
+
+                      const stepfunctions = new AWS.StepFunctions();
+
+                      var message = "";
+
+                      if (action === "approve") {
+                        message = { "Status": "Approved! Task approved by Marcel.Viehmaier@gmx.de",
+                        "Comment": event};
+                      } else if (action === "reject") {
+                        message = { "Status": "Rejected! Task rejected by Marcel.Viehmaier@gmx.de" };
+                      } else {
+                        console.error("Unrecognized action. Expected: approve, reject.");
+                        callback({"Status": "Failed to process the request. Unrecognized Action."});
+                      }
+
+                      stepfunctions.sendTaskSuccess({
+                        output: JSON.stringify(message),
+                        taskToken: event.query.taskToken
+                      })
+                      .promise()
+                      .then(function(data) {
+                        redirectToStepFunctions(context.invokedFunctionArn, statemachineName, executionName, callback);
+                      }).catch(function(err) {
+                        console.error(err, err.stack);
+                        callback(err);
+                      });
+                    }
+
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/human-approval-LambdaApiGatewayIAMRole-1G21S1P6UGK5"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction4:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "LambdaDeletionFunction2"
+            Handler: "index.handler"
+            Code: 
+                ZipFile: |
+                    var AWS = require('aws-sdk');
+                    var docClient = new AWS.DynamoDB.DocumentClient();
+
+                    exports.handler = async(event) => {
+                      AWS.config.update({ region: 'us-east-2' });
+                      const s3 = new AWS.S3();
+
+                    console.log(event['Comment']);
+                      var objects = [];
+                      for (var k in event['Comment']) {
+                        objects.push({Key : event['Comment'][k].Key});
+                      }
+                      console.log(objects);
+                      var params = {
+                        Bucket: 'test-buckettoindex-15ljios7rwr8o',
+                        Delete: {
+                          Objects: objects
+                        }
+                      };
+                      try {
+                        try {
+                          await s3.deleteObjects(params).promise()
+                          console.log("file deleted Successfully")
+                          await deleteItems("test-IndexTable-1XURJ1ZGKDTQ2", event['Comment'][0].CustID);
+                        }
+                        catch (err) {
+                          console.log("ERROR in file Deleting : " + JSON.stringify(err))
+                        }
+                      }
+                      catch (err) {
+                        console.log("File not Found ERROR : " + err.code)
+                      }
+                    };
+
+                    async function deleteItems(tableName, partitionId) {
+                      console.log('Delete from metaindex store');
+                      console.log(tableName);
+                      console.log(partitionId);
+                      var params = {
+                        KeyConditionExpression: 'CustID = :CustID',
+                        ExpressionAttributeValues: {
+                          ':CustID': partitionId
+                        },
+                        TableName: 'test-IndexTable-1XURJ1ZGKDTQ2'
+                      };
+                      var result = await docClient.query(params).promise()
+                      result.Items.forEach(item => {
+                        console.log(item);
+                      });
+
+                      if (result.Items && result.Items.length > 0) {
+
+                        const batchCalls = chunks(result.Items, 25).map(async(chunk) => {
+                          const deleteRequests = chunk.map(item => {
+                            return {
+                              DeleteRequest: {
+                                Key: {
+                                  'CustID': item.CustID,
+                                  'TS-ServerID': item['TS-ServerID'],
+
+                                }
+                              }
+                            }
+                          })
+
+                          const batchWriteParams = {
+                            RequestItems: {
+                              [tableName]: deleteRequests
+                            }
+                          }
+                          await docClient.batchWrite(batchWriteParams).promise()
+                        })
+
+                        await Promise.all(batchCalls)
+                      }
+                    }
+
+                    // https://stackoverflow.com/a/37826698/3221253
+                    function chunks(inputArray, perChunk) {
+                      return inputArray.reduce((all, one, i) => {
+                        const ch = Math.floor(i / perChunk);
+                        all[ch] = [].concat((all[ch] || []), one);
+                        return all
+                      }, [])
+                    }
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/LambdaDeletionFunction-role-f9r0muid"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+
+    LambdaFunction5:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: "Fetches metadata from dynamodb"
+            FunctionName: "fetchDeletionMetadata2"
+            Handler: "index.handler"
+            Code: 
+                ZipFile: |
+                    var AWS = require('aws-sdk');
+                    AWS.config.update({ region: 'us-east-2' });
+                    var docClient = new AWS.DynamoDB.DocumentClient({ apiVersion: "2012-08-10" });
+
+                    exports.handler = async(event, context, callback) => {
+                        try {
+                            var params = {
+                                KeyConditionExpression: 'CustID = :CustID',
+                                ExpressionAttributeValues: {
+                                    ':CustID': event['Comment']
+                                },
+                                TableName: 'test-IndexTable-1XURJ1ZGKDTQ2'
+                            };
+                            var result = await docClient.query(params).promise()
+                            result.Items.forEach(item => {
+                                console.log(item.Key);
+                            });
+                            var comment = event.Comment;
+                            comment = {
+                                "Comment": result.Items,
+                            }
+                            return comment;
+                            callback(null, comment);
+                        }
+                        catch (error) {
+                            console.error(error);
+                        }
+                    };
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/fetchDeletionMetadata-role-apjij0bx"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+    StepFunctionsActivity:
+        Type: "AWS::StepFunctions::Activity"
+        Properties:
+            Name: "ManualStep"
+
+    StepFunctionsStateMachine:
+        Type: "AWS::StepFunctions::StateMachine"
+        Properties:
+            StateMachineName: "HumanApprovalLambdaStateMachine-2JW8md3XWCEt2"
+            DefinitionString: !Sub |
+                {
+                    "StartAt": "FetchMetadataTask",
+                    "TimeoutSeconds": 3600,
+                    "States": {
+                      "FetchMetadataTask":{
+                          "Type":"Task",         
+                          "Resource":"arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:fetchDeletionMetadata2",    
+                          "ResultPath": "$",
+                          "Next": "SendEMailTask"
+                      },
+                        "SendEMailTask": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+                            "Parameters": {
+                              "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:human-approval-LambdaHumanApprovalSendEmailFunctio-150ZOUJS1IPJM2",
+                              "Payload": {
+                                          "ExecutionContext.$": "$$",
+                                          "APIGatewayEndpoint": "https://pijg1rm29d.execute-api.${AWS::Region}.amazonaws.com/states",
+                                "Comment.$": "$"
+                              }},
+                          "InputPath": "$",
+                          "ResultPath": "$.taskresult",
+                          "OutputPath": "$",
+                          "Next": "ManualApprovalChoiceState"
+                        },
+                        "ManualApprovalChoiceState": {
+                          "Type": "Choice",
+                          "InputPath": "$",
+                          "Choices": [
+                            {
+                              "Variable": "$.taskresult.Status",
+                              "StringEquals": "Approved! Task approved by Marcel.Viehmaier@gmx.de",
+                              "Next": "ApprovedPassState"
+                            },
+                            {
+                              "Variable": "$.taskresult.Status",
+                              "StringEquals": "Rejected! Task rejected by Marcel.Viehmaier@gmx.de",
+                              "Next": "RejectedPassState"
+                            }
+                          ]
+                        },
+                        "ApprovedPassState": {
+                          "Type": "Pass",
+                          "Next": "DeletionTask"
+                        },
+                      "DeletionTask":{
+                          "Type":"Task",
+                          "Resource":"arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:LambdaDeletionFunction2",         
+                          "End":true
+                      },
+                        "RejectedPassState": {
+                          "Type": "Pass",
+                          "End": true
+                        }
+                    }
+                }
+                
+            RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/human-approval-LambdaStateMachineExecutionRole-1BU3IYKQVGHQR"
+            StateMachineType: "STANDARD"
+            LoggingConfiguration: 
+                IncludeExecutionData: false
+                Level: "OFF"
+    S3Bucket:
+        Type: "AWS::S3::Bucket"
+        Properties:
+            BucketName: "test-buckettoindex-15ljios7rwr8o2"
+            NotificationConfiguration: 
+                LambdaConfigurations: 
+                  - 
+                    Event: "s3:ObjectCreated:*"
+                    Function: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:test-IndexerFunction-1NHVJDBVD1WFK"
+
+    DynamoDBTable:
+        Type: "AWS::DynamoDB::Table"
+        Properties:
+            AttributeDefinitions: 
+              - 
+                AttributeName: "CustID"
+                AttributeType: "S"
+              - 
+                AttributeName: "HasTransaction"
+                AttributeType: "S"
+              - 
+                AttributeName: "ServerID"
+                AttributeType: "S"
+              - 
+                AttributeName: "TS-ServerID"
+                AttributeType: "S"
+            BillingMode: "PAY_PER_REQUEST"
+            TableName: "test-IndexTable-1XURJ1ZGKDTQ22"
+            KeySchema: 
+              - 
+                AttributeName: "CustID"
+                KeyType: "HASH"
+              - 
+                AttributeName: "TS-ServerID"
+                KeyType: "RANGE"
+            LocalSecondaryIndexes: 
+              - 
+                IndexName: "CustomerTransactions"
+                KeySchema: 
+                  - 
+                    AttributeName: "CustID"
+                    KeyType: "HASH"
+                  - 
+                    AttributeName: "HasTransaction"
+                    KeyType: "RANGE"
+                Projection: 
+                    ProjectionType: "INCLUDE"
+                    NonKeyAttributes: 
+                      - "Key"
+            GlobalSecondaryIndexes: 
+              - 
+                IndexName: "ServerIndex"
+                KeySchema: 
+                  - 
+                    AttributeName: "ServerID"
+                    KeyType: "HASH"
+                  - 
+                    AttributeName: "TS-ServerID"
+                    KeyType: "RANGE"
+                Projection: 
+                    ProjectionType: "INCLUDE"
+                    NonKeyAttributes: 
+                      - "Key"
+                ProvisionedThroughput: 
+                    ReadCapacityUnits: 0
+                    WriteCapacityUnits: 0
+    ApiGatewayResource:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi3
+            PathPart: "fail"
+            ParentId: !GetAtt ApiGatewayRestApi3.RootResourceId
+
+    ApiGatewayResource2:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi2
+            PathPart: "user"
+            ParentId: !GetAtt ApiGatewayRestApi2.RootResourceId
+
+    ApiGatewayResource3:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi3
+            PathPart: "succeed"
+            ParentId: !GetAtt ApiGatewayRestApi3.RootResourceId
+
+    ApiGatewayResource4:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "execution"
+            ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+
+    ApiGatewayMethod:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi2
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "POST"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                Credentials: !Sub "arn:aws:iam::${AWS::AccountId}:role/APIGatewayToStepFunctions"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": !Sub |
+                        {
+                            "input": "$util.escapeJavaScript($input.json('$'))",
+                            "stateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:HumanApprovalLambdaStateMachine-2JW8md3XWCEt"
+                        } 
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:states:action/StartExecution"
+            AuthorizationScopes: 
+              - !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod2:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi3
+            ResourceId: !Ref ApiGatewayResource3
+            HttpMethod: "GET"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.querystring.taskToken": false
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource3
+                Credentials: !Sub "arn:aws:iam::${AWS::AccountId}:role/APIGatewayToStepFunctions"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": |
+                        {
+                           "output": "\"Approve link was clicked.\"",
+                           "taskToken": "$input.params('taskToken')"
+                        }
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:states:action/SendTaskSuccess"
+
+    ApiGatewayMethod3:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource4
+            HttpMethod: "GET"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestParameters: {}
+            RequestModels: {}
+            MethodResponses: 
+              - 
+                ResponseModels: {}
+                ResponseParameters: 
+                    "method.response.header.Location": true
+                StatusCode: "302"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource4
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseParameters: 
+                        "method.response.header.Location": "integration.response.body.headers.Location"
+                    ResponseTemplates: {}
+                    StatusCode: "302"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                RequestParameters: {}
+                RequestTemplates: 
+                    "application/json": |
+                        {
+                          "body" : $input.json('$'),
+                          "headers": {
+                            #foreach($header in $input.params().header.keySet())
+                            "$header": "$util.escapeJavaScript($input.params().header.get($header))" #if($foreach.hasNext),#end
+                        
+                            #end
+                          },
+                          "method": "$context.httpMethod",
+                          "params": {
+                            #foreach($param in $input.params().path.keySet())
+                            "$param": "$util.escapeJavaScript($input.params().path.get($param))" #if($foreach.hasNext),#end
+                        
+                            #end
+                          },
+                          "query": {
+                            #foreach($queryParam in $input.params().querystring.keySet())
+                            "$queryParam": "$util.escapeJavaScript($input.params().querystring.get($queryParam))" #if($foreach.hasNext),#end
+                        
+                            #end
+                          }  
+                        }
+                        
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:LambdaApprovalFunction/invocations"
+
+    ApiGatewayRestApi:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "Human approval endpoint2"
+            Description: "HTTP Endpoint backed by API Gateway and Lambda"
+            ApiKeySourceType: "HEADER"
+            EndpointConfiguration: 
+                Types: 
+                  - "EDGE"
+
+    ApiGatewayRestApi2:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "step-functions-deletion-gateway2"
+            ApiKeySourceType: "HEADER"
+            EndpointConfiguration: 
+                Types: 
+                  - "REGIONAL"
+
+    ApiGatewayRestApi3:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "StepFunctionsAPI2"
+            ApiKeySourceType: "HEADER"
+            EndpointConfiguration: 
+                Types: 
+                  - "REGIONAL"
+
+    ApiGatewayAuthorizer:
+        Type: "AWS::ApiGateway::Authorizer"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi2
+            Name: "gdpr-microservices-api-auhtorizer2"
+            Type: "COGNITO_USER_POOLS"
+            ProviderARNs: 
+              - !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${AWS::Region}_f7R1ywB5i"
+            AuthType: "cognito_user_pools"
+            IdentitySource: "method.request.header.Authorization"
+    CognitoUserPoolResourceServer:
+        Type: "AWS::Cognito::UserPoolResourceServer"
+        Properties:
+            Identifier: !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev"
+            Name: "gdpr-microservice-resource-server"
+            UserPoolId: !Ref CognitoUserPool
+            Scopes: 
+              - 
+                ScopeName: "user.read"
+                ScopeDescription: "retrieve user data"
+
+    CognitoUserPool:
+        Type: "AWS::Cognito::UserPool"
+        Properties:
+            UserPoolName: "gdpr-microservices-user-pool"
+            Policies: 
+                PasswordPolicy: 
+                    MinimumLength: 6
+                    RequireUppercase: false
+                    RequireLowercase: false
+                    RequireNumbers: true
+                    RequireSymbols: false
+                    TemporaryPasswordValidityDays: 7
+            LambdaConfig: {}
+            Schema: 
+              - 
+                Name: "sub"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: false
+                Required: true
+                StringAttributeConstraints: 
+                    MinLength: "1"
+                    MaxLength: "2048"
+              - 
+                Name: "name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "given_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "family_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "middle_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "nickname"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "preferred_username"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "profile"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "picture"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "website"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "email"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: true
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "email_verified"
+                AttributeDataType: "Boolean"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+              - 
+                Name: "gender"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "birthdate"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "10"
+                    MaxLength: "10"
+              - 
+                Name: "zoneinfo"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "locale"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "phone_number"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "address"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "updated_at"
+                AttributeDataType: "Number"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                NumberAttributeConstraints: 
+                    MinValue: "0"
+            AutoVerifiedAttributes: 
+              - "email"
+            MfaConfiguration: "OFF"
+            EmailConfiguration: 
+                EmailSendingAccount: "COGNITO_DEFAULT"
+            AdminCreateUserConfig: 
+                AllowAdminCreateUserOnly: false
+            UserPoolTags: {}
+            AccountRecoverySetting: 
+                RecoveryMechanisms: 
+                  - 
+                    Priority: 1
+                    Name: "verified_email"
+                  - 
+                    Priority: 2
+                    Name: "verified_phone_number"
+            UsernameConfiguration: 
+                CaseSensitive: false
+            VerificationMessageTemplate: 
+                DefaultEmailOption: "CONFIRM_WITH_CODE"
+
+    CognitoUserPoolClient:
+        Type: "AWS::Cognito::UserPoolClient"
+        Properties:
+            UserPoolId: !Ref CognitoUserPool
+            ClientName: "gdpr-microservices-client-app"
+            RefreshTokenValidity: 3650
+            ReadAttributes: 
+              - "address"
+              - "birthdate"
+              - "email"
+              - "email_verified"
+              - "family_name"
+              - "gender"
+              - "given_name"
+              - "locale"
+              - "middle_name"
+              - "name"
+              - "nickname"
+              - "phone_number"
+              - "picture"
+              - "preferred_username"
+              - "profile"
+              - "updated_at"
+              - "website"
+              - "zoneinfo"
+            WriteAttributes: 
+              - "address"
+              - "birthdate"
+              - "email"
+              - "family_name"
+              - "gender"
+              - "given_name"
+              - "locale"
+              - "middle_name"
+              - "name"
+              - "nickname"
+              - "phone_number"
+              - "picture"
+              - "preferred_username"
+              - "profile"
+              - "updated_at"
+              - "website"
+              - "zoneinfo"
+            ExplicitAuthFlows: 
+              - "ALLOW_CUSTOM_AUTH"
+              - "ALLOW_REFRESH_TOKEN_AUTH"
+              - "ALLOW_USER_SRP_AUTH"
+            GenerateSecret: true
+            PreventUserExistenceErrors: "ENABLED"

@@ -1,0 +1,723 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+    Generator: "former2"
+Description: ""
+Resources:
+    S3Bucket:
+        Type: "AWS::S3::Bucket"
+        Properties:
+            BucketName: "configurationstorage"
+            NotificationConfiguration: 
+                LambdaConfigurations: 
+                  - 
+                    Event: "s3:ObjectCreated:*"
+                    Filter: 
+                        S3Key: 
+                            Rules: 
+                              - 
+                                Name: "Suffix"
+                                Value: ".yaml"
+                    Function: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:purporize"
+    DynamoDBTable:
+        Type: "AWS::DynamoDB::Table"
+        Properties:
+            AttributeDefinitions: 
+              - 
+                AttributeName: "id"
+                AttributeType: "N"
+            TableName: "purpose-table"
+            KeySchema: 
+              - 
+                AttributeName: "id"
+                KeyType: "HASH"
+            ProvisionedThroughput: 
+                ReadCapacityUnits: 5
+                WriteCapacityUnits: 5
+    DynamoDBTable2:
+        Type: "AWS::DynamoDB::Table"
+        Properties:
+            AttributeDefinitions: 
+              - 
+                AttributeName: "aip_code"
+                AttributeType: "S"
+              - 
+                AttributeName: "username"
+                AttributeType: "S"
+            TableName: "user-table"
+            KeySchema: 
+              - 
+                AttributeName: "aip_code"
+                KeyType: "HASH"
+              - 
+                AttributeName: "username"
+                KeyType: "RANGE"
+            ProvisionedThroughput: 
+                ReadCapacityUnits: 5
+                WriteCapacityUnits: 5
+    LambdaFunction:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "purporize"
+            Handler: "index.handler"
+            Code:
+                ZipFile: |
+                    const AWS = require('aws-sdk');
+                    const s3 = new AWS.S3();
+                    const yaml = require('js-yaml');
+
+                    const { savePurpose } = require('./repository.js');
+                    const { calculateAip } = require('./nodemanager.js');
+                    const { calculatePip } = require('./nodemanager.js');
+
+                    var purposeArray = [];
+                    var decimalNumber = 512;
+
+                    const ddb = new AWS.DynamoDB.DocumentClient({ region: 'us-east-2' });
+
+                    exports.savePurpose = (purpose) => {
+                        var params = {
+                            TableName: 'purpose-table',
+                            Item: {
+                                'id': purpose.id,
+                                'name': purpose.name,
+                                'parent': purpose.parent,
+                                'code': purpose.code.toString(16),
+                                'aip_code': purpose.aip.toString(16),
+                                'pip_code': purpose.pip.toString(16)
+                            }
+                        };
+
+                        ddb.put(params, function(err, data) {
+                            if (err) {
+                                console.log("Error", err);
+                            }
+                            else {
+                                console.log("Success", data);
+                            }
+                        });
+                    }
+
+                    exports.handler = (event, context, callback) => {
+                        reset();
+                        var bucketName = 'configurationstorage'; // Name of the bucket
+                        var keyName = 'purposes.yaml'; // Key of the document
+                        readFile(bucketName, keyName, readFileContent, onError);
+                    };
+
+                    function readFile(bucketName, filename, onFileContent, onError) {
+                        var params = { Bucket: bucketName, Key: filename };
+                        s3.getObject(params).promise()
+                            .then((configYaml) => {
+                                // Add purposes from YAML file to Array
+                                for (let purpose of loadYAMLFile(configYaml).purposes) {
+                                    addPurposeToArray(purpose);
+                                }
+                                // Calculate aip_code and pip_code for each purpose
+                                purposeArray.forEach(purpose => {
+                                    purpose = calculateAip(purpose, purposeArray);
+                                    purpose = calculatePip(purpose, purposeArray);
+                                    savePurpose(purpose)
+                                });
+                            });
+                    }
+
+                    function readFileContent(filename, content) {
+                        console.log(content);
+                    }
+
+                    function onError(err) {
+                        console.log('error: ' + err);
+                    }
+
+                    function loadYAMLFile(configYaml) {
+                        const data = configYaml.Body.toString('utf-8');
+                        return yaml.safeLoad(data);
+                    }
+
+                    function addPurposeToArray(purpose) {
+                        // Add default code for each purpose
+                        purpose.code = decimalNumber;
+                        decimalNumber = decimalNumber / 2;
+
+                        // Add purpose to array
+                        purposeArray.push(purpose);
+                    }
+
+                    function reset(){
+                        decimalNumber = 512;
+                        purposeArray = [];
+                    }
+
+                    // Calculate aip_code for specific purpose
+                    exports.calculatePip = (purpose, purposeArray) => {
+                        purpose.pip = 0;
+                        purpose = findAncestors(purpose, purposeArray);
+                        purpose.pip = purpose.pip + purpose.aip;
+                        return purpose;
+                    }
+
+                    // Calculate pip_code for specific purpose
+                    exports.calculateAip = (purpose, purposeArray) => {
+                        purpose.aip = 0;
+                        let childNodeIds = getChildNodes(purposeArray, purpose.id.toString());
+                        for (let childId of childNodeIds) {
+                            purpose.aip = purpose.aip + parseInt(purposeArray.find(p => p.id == childId).code);
+                        }
+                        return purpose;
+                    }
+
+                    // Find parents of node
+                    function findAncestors(purpose, purposeArray) {
+                        var element = purpose;
+                        while (element.parent != 0) {
+                            purpose.pip = purpose.pip + purposeArray.find(p => p.id == element.parent).code;
+                            element = purposeArray.find(p => p.id == element.parent);
+                        }
+                        return purpose;
+                    }
+
+                    // Find childs of node
+                    function getChildNodes(data, s) {
+                        function go(a) {
+                            r.push(a);
+                            o[a] && o[a].forEach(go);
+                        }
+
+                        var o = data.reduce(function(r, a) {
+                                r[a.parent] = r[a.parent] || [];
+                                r[a.parent].push(a.id);
+                                return r;
+                            }, {}),
+                            r = [s];
+
+                        o[s] && o[s].forEach(go);
+                        return r;
+                    }
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/test"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+    LambdaFunction2:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: ""
+            FunctionName: "service-iam-api-management"
+            Handler: "index.handler"
+            Code:
+                ZipFile: |
+                    var AWS = require('aws-sdk');
+                    AWS.config.update({ region: 'us-east-2' });
+                    var docClient = new AWS.DynamoDB.DocumentClient({ apiVersion: "2012-08-10" });
+
+                    exports.handler = async(event, context, callback) => {
+                        if (event["httpMethod"] == 'GET') {
+                            var params = {
+                                TableName: 'user-table',
+                                Key: {
+                                    "username": event.pathParameters.id,
+                                    "aip_code": event["queryStringParameters"]['ap']
+                                }
+                            }
+                            var result = await docClient.get(params).promise();
+                            var response = {
+                                "statusCode": 200,
+                                "body": JSON.stringify(result.Item),
+                                "isBase64Encoded": false
+                            };
+                            callback(null, response);
+                        }
+
+                        if (event["httpMethod"] == 'POST') {
+                            const body = JSON.parse(event.body);
+                            var params = {
+                                TableName: 'user-table',
+                                Item: {
+                                    'id': context.awsRequestId,
+                                    'name': body.name,
+                                    'username': body.username,
+                                    'email': body.email,
+                                    'password': body.password,
+                                    'aip_code': body.aip_code,
+                                    'pip_code': body.pip_code
+                                }
+                            };
+
+                            let result = await docClient.put(params).promise();
+                            var response = {
+                                "statusCode": 200,
+                                "body": JSON.stringify(result.Item),
+                                "isBase64Encoded": false
+                            };
+                            callback(null, response);
+                        }
+
+                        if (event["httpMethod"] == 'PUT') {
+                            const body = JSON.parse(event.body);
+                            const params = {
+                                TableName: 'user-table',
+                                Key: {
+                                    "username": event.pathParameters.id,
+                                    "aip_code": event["queryStringParameters"]['ap']
+                                },
+                                UpdateExpression: 'set email = :r',
+                                ExpressionAttributeValues: {
+                                    ':r': body.email,
+                                },
+                            };
+
+                            let result = await docClient.update(params).promise();
+                            var response = {
+                                "statusCode": 200,
+                                "body": JSON.stringify(result.Item),
+                                "isBase64Encoded": false
+                            };
+                            callback(null, response);
+                        }
+
+                        if (event["httpMethod"] == 'DELETE') {
+                            const body = JSON.parse(event.body);
+                            const params = {
+                                TableName: 'user-table',
+                                Key: {
+                                    "username": event.pathParameters.id,
+                                    "aip_code": event["queryStringParameters"]['ap']
+                                }
+                            };
+
+                            let result = await docClient.delete(params).promise();
+                            var response = {
+                                "statusCode": 200,
+                                "body": JSON.stringify(result.Item),
+                                "isBase64Encoded": false
+                            };
+                            callback(null, response);
+                        }
+
+                    };
+            MemorySize: 128
+            Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/lambda-pupose-access"
+            Runtime: "nodejs12.x"
+            Timeout: 3
+            TracingConfig: 
+                Mode: "PassThrough"
+    ApiGatewayRestApi:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "service-iam-gateway"
+            Description: "API Gateway for backend microservices"
+            ApiKeySourceType: "HEADER"
+            EndpointConfiguration: 
+                Types: 
+                  - "REGIONAL"
+
+    ApiGatewayResource:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "user"
+            ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+
+    ApiGatewayResource2:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "{id}"
+            ParentId: !Ref ApiGatewayResource
+
+    ApiGatewayMethod:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "DELETE"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:service-iam-api-management/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod2:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource
+            HttpMethod: "POST"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:service-iam-api-management/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod3:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "PUT"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:service-iam-api-management/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+
+    ApiGatewayMethod4:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "GET"
+            AuthorizationType: "COGNITO_USER_POOLS"
+            AuthorizerId: !Ref ApiGatewayAuthorizer
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+                "method.request.querystring.ap": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": "Empty"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                ContentHandling: "CONVERT_TO_TEXT"
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: {}
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_MATCH"
+                TimeoutInMillis: 29000
+                Type: "AWS_PROXY"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:service-iam-api-management/invocations"
+            AuthorizationScopes: 
+              - !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev/user.read"
+    ApiGatewayAuthorizer:
+        Type: "AWS::ApiGateway::Authorizer"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            Name: "gdpr-microservices-api-auhtorizer"
+            Type: "COGNITO_USER_POOLS"
+            ProviderARNs: 
+              - !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${AWS::Region}_f7R1ywB5i"
+            AuthType: "cognito_user_pools"
+            IdentitySource: "method.request.header.Authorization"
+    CognitoUserPoolResourceServer:
+        Type: "AWS::Cognito::UserPoolResourceServer"
+        Properties:
+            Identifier: !Sub "https://owz4bh9byl.execute-api.${AWS::Region}.amazonaws.com/dev"
+            Name: "gdpr-microservice-resource-server"
+            UserPoolId: !Ref CognitoUserPool
+            Scopes: 
+              - 
+                ScopeName: "user.read"
+                ScopeDescription: "retrieve user data"
+
+    CognitoUserPool:
+        Type: "AWS::Cognito::UserPool"
+        Properties:
+            UserPoolName: "gdpr-microservices-user-pool"
+            Policies: 
+                PasswordPolicy: 
+                    MinimumLength: 6
+                    RequireUppercase: false
+                    RequireLowercase: false
+                    RequireNumbers: true
+                    RequireSymbols: false
+                    TemporaryPasswordValidityDays: 7
+            LambdaConfig: {}
+            Schema: 
+              - 
+                Name: "sub"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: false
+                Required: true
+                StringAttributeConstraints: 
+                    MinLength: "1"
+                    MaxLength: "2048"
+              - 
+                Name: "name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "given_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "family_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "middle_name"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "nickname"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "preferred_username"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "profile"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "picture"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "website"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "email"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: true
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "email_verified"
+                AttributeDataType: "Boolean"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+              - 
+                Name: "gender"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "birthdate"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "10"
+                    MaxLength: "10"
+              - 
+                Name: "zoneinfo"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "locale"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "phone_number"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "address"
+                AttributeDataType: "String"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                StringAttributeConstraints: 
+                    MinLength: "0"
+                    MaxLength: "2048"
+              - 
+                Name: "updated_at"
+                AttributeDataType: "Number"
+                DeveloperOnlyAttribute: false
+                Mutable: true
+                Required: false
+                NumberAttributeConstraints: 
+                    MinValue: "0"
+            AutoVerifiedAttributes: 
+              - "email"
+            MfaConfiguration: "OFF"
+            EmailConfiguration: 
+                EmailSendingAccount: "COGNITO_DEFAULT"
+            AdminCreateUserConfig: 
+                AllowAdminCreateUserOnly: false
+            UserPoolTags: {}
+            AccountRecoverySetting: 
+                RecoveryMechanisms: 
+                  - 
+                    Priority: 1
+                    Name: "verified_email"
+                  - 
+                    Priority: 2
+                    Name: "verified_phone_number"
+            UsernameConfiguration: 
+                CaseSensitive: false
+            VerificationMessageTemplate: 
+                DefaultEmailOption: "CONFIRM_WITH_CODE"
+
+    CognitoUserPoolClient:
+        Type: "AWS::Cognito::UserPoolClient"
+        Properties:
+            UserPoolId: !Ref CognitoUserPool
+            ClientName: "gdpr-microservices-client-app"
+            RefreshTokenValidity: 3650
+            ReadAttributes: 
+              - "address"
+              - "birthdate"
+              - "email"
+              - "email_verified"
+              - "family_name"
+              - "gender"
+              - "given_name"
+              - "locale"
+              - "middle_name"
+              - "name"
+              - "nickname"
+              - "phone_number"
+              - "picture"
+              - "preferred_username"
+              - "profile"
+              - "updated_at"
+              - "website"
+              - "zoneinfo"
+            WriteAttributes: 
+              - "address"
+              - "birthdate"
+              - "email"
+              - "family_name"
+              - "gender"
+              - "given_name"
+              - "locale"
+              - "middle_name"
+              - "name"
+              - "nickname"
+              - "phone_number"
+              - "picture"
+              - "preferred_username"
+              - "profile"
+              - "updated_at"
+              - "website"
+              - "zoneinfo"
+            ExplicitAuthFlows: 
+              - "ALLOW_CUSTOM_AUTH"
+              - "ALLOW_REFRESH_TOKEN_AUTH"
+              - "ALLOW_USER_SRP_AUTH"
+            GenerateSecret: true
+            PreventUserExistenceErrors: "ENABLED"
